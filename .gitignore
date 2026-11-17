@@ -1,0 +1,13 @@
+# Game files are not ours to distribute
+*.nes
+*.zip
+*.mp4
+
+# Generated from the ROM (contain ROM bytes or game state)
+scripts/disasm/
+*.asm
+*.pkl
+*.out
+
+__pycache__/
+.DS_Store
