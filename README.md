@@ -8,8 +8,9 @@ This repo contains the write-up below and the Python tools used for the analysis
 
 - The only way the game ever enters its stage-clear sequence is one check at `$CEEA`: `LDA $3B / BNE $CF25` ("is the stage-clear flag set?").
 - No code path in the game can set that flag, or the game-mode byte, except the boss's death routines. Every indexed/indirect store that could alias those bytes was traced and ruled out, and lag-frame NMIs can't corrupt them.
-- The clip's behaviour (player vanishes with no death animation, ~2.7 s of frozen screen, then Stage 2) matches the game's own stage-clear walk-off sequence exactly, entered without the boss being killed.
-- The most plausible cause is a **hardware read error / bit flip** at that single check — e.g. a dirty cartridge connection misreading `BNE` (`$D0`) as `BEQ` (`$F0`). Seven different one-bit errors at `$CEEA–$CEEC` produce the skip. This is a hypothesis, not a proof.
+- The most plausible cause is a **hardware read error / bit flip** at that single check, e.g. a dirty cartridge connection misreading `BNE` (`$D0`) as `BEQ` (`$F0`). Seven different one-bit errors at `$CEEA–$CEEC` produce the skip. DK28 was playing on original hardware.
+- **Simulating that misread for one frame while the player falls into a pit reproduces the clip:** the pit death, the lives medal dropping 2→1, a fade 160 frames after the body leaves the screen, and Stage 2 with REST 2. All the timings match the footage to within a few frames. The respawned player isn't visible in the clip because it blinks on alternate frames and the footage was captured at 30 fps.
+- This shows a single misread *can* produce exactly this footage. It isn't proof that one did.
 
 ---
 
@@ -132,15 +133,61 @@ The decision is one instruction pair, `7:CEEA  A5 3B  LDA $3B` / `7:CEEC  D0 37 
 
 A misread from a dirty or poorly seated cartridge affects ROM fetches, and seven different single-bit errors at those three bytes lead straight to the skip. It also explains why nobody can reproduce it.
 
-## 6. Conclusion
+## 6. Simulating the misread
+
+`sim_misread.py` and `sim_misread3.py` replay a fall into a bottomless pit in Stage 1's cliff section. For exactly one frame, the emulator returns `$F0` instead of `$D0` when the CPU reads `$CEEC`. Nothing else is changed: no values are forced and there's no controller input after the drop.
+
+### What the clip shows, frame by frame
+
+The clip was checked at its full 60 fps rate, and the top-left lives medals were zoomed in on:
+
+| Time | Event |
+|---|---|
+| 11.45–12.00 | Player at the bottom of the pit, in the pit-death pop-up animation |
+| 12.00 | Player gone; only the two capsules still move, flying off the top right |
+| 12.75–13.47 | Nothing on screen changes |
+| **13.47** | **Lives medals drop from 2 to 1**, the end of the death sequence (`7:D9FA DEC $32`) |
+| 13.47–14.83 | Nothing on screen changes. No respawn is visible. |
+| 14.83 | Fade to black, then the Stage 2 card: "REST 2" |
+
+The card prints `$32 + 1` while the player isn't game-over (`7:CA6F`), so "REST 2" means `$32 = 1`. That fits a life being used in the pit.
+
+### Clip vs simulation
+
+| | Clip | One-frame misread while falling |
+|---|---|---|
+| Body gone → lives decrement | 88 frames | 84 frames |
+| Body gone → fade | ~170 frames | 160 frames |
+| Lives decrement → fade | 82 frames | 76 frames |
+| Lives at Stage 2 | `$32 = 1` | `$32 = 1` |
+| Without the misread | — | Normal respawn, the game continues |
+
+Sequence in the simulation:
+1. The misread switches the game to mode `08`, then `09` on the next frame. The walk-off clears controller input every frame, so the player is no longer under control.
+2. The fall death happens normally, and the walk-off removes the body once it's below the screen (`3:BF8A`).
+3. No one is left walking, so the 160-frame countdown starts.
+4. The death timer runs out, a life is used, and the player respawns.
+5. The countdown ends and Stage 2 loads.
+
+Any single frame between leaving the ledge and the fall death gives the same result. A misread *after* the death doesn't match: mode `08` waits for the respawn, and the respawned player visibly walks off for about 7 s.
+
+### Why the respawn isn't visible in the clip
+
+A respawned player is invincible for 128 frames (`7:D50D`), and during that time the sprite is hidden on every other frame (`2:B004`, based on bit 0 of the frame counter `$1A`). The fade comes 76 frames after the respawn, so the player blinks the whole time. DK28's clip only changes on alternate frames: the 60 fps file follows a strict `0101…` pattern, so it was captured at 30 fps. A 30 fps capture keeps every other NES frame, so a sprite that blinks on alternate frames appears either solid or not at all. This footage landed on the "not at all" side.
+
+### Caveats
+
+- The exact pit isn't known. The simulations used several pits in the same cliff section, and the timings didn't depend on which one.
+- The emulator models game logic only, with no PPU, but every event compared here is game logic.
+- This shows that a single misread reproduces the footage exactly. It doesn't prove that one happened.
+
+## 7. Conclusion
 
 - The game's code has no software path into the stage-clear sequence other than killing a boss.
-- What the clip shows (instant vanish, ~2.7 s still screen, Stage 2) is exactly mode `09` running with no player left to walk off.
-- The most likely trigger is a hardware-level error at `7:CEEA–CEEC` or in RAM `$3B`.
+- A single cartridge misread at `7:CEEA–CEEC` (or a bit flip in RAM `$3B`) while DK28 was falling sends the game into its own end-of-stage sequence. Simulated, it reproduces everything in the clip, with matching timings.
+- DK28 was on original hardware, where intermittent cartridge misreads are a known problem. That would also explain why nobody has been able to reproduce the skip.
 
-**Not proven.** Confirming it needs DK28's setup (console or emulator) or frame-accurate footage. In an accurate emulator (Mesen, FCEUX), a write breakpoint on `$2C` and `$3B` at that pit would show the instruction responsible if it can be triggered in software at all.
-
-## 7. Tools
+## 8. Tools
 
 All scripts are in `scripts/` and take the ROM path as their first argument. Run them from inside `scripts/` with plain `python3` (not `python3 -I`), so the local `dis.py` takes precedence over Python's built-in `dis` module. No dependencies beyond the Python 3 standard library.
 
@@ -156,6 +203,8 @@ All scripts are in `scripts/` and take the ROM path as their first argument. Run
 | `boot.py ROM` | Boots to Stage 1 and saves `start.pkl` (needed by the experiment scripts) |
 | `trace_clear.py ROM` | Plays a boss kill into Stage 2, logging every write to the stage-flow variables |
 | `force_clear.py ROM` | The flag-poking experiment in section 3 |
+| `sim_misread.py ROM` | One-frame `$CEEC` misread (`BNE`→`BEQ`) injected at each frame across a pit fall |
+| `sim_misread3.py ROM` | Clean bottomless-pit falls with the misread, timing the death, lives decrement, respawn and fade |
 | `exp1.py`–`exp5.py` | Random play, systematic drops, screen-counter test, pit drops, pit-jump replay |
 
 To regenerate a full disassembly: `for b in 0 1 2 3 4 5 6; do python3 dis.py ROM $b 8000 C000 > bank$b.asm; done; python3 dis.py ROM 7 C000 10000 > bank7.asm`.
